@@ -12,3 +12,4 @@ remitwise-common = { path = "../remitwise-common" }
 
 [dev-dependencies]
 soroban-sdk = { version = "21.0.0", features = ["testutils"] }
+testutils = { path = "../testutils" }

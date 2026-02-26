@@ -16,6 +16,9 @@ members = [
     "orchestrator",
     "cli",
     "scenarios",
+
+    "testutils",
+
     "integration_tests",
 ]
 default-members = [
@@ -27,6 +30,7 @@ default-members = [
     "data_migration",
     "reporting",
     "orchestrator",
+
 ]
 resolver = "2"
 
