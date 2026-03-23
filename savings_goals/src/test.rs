@@ -1784,4 +1784,118 @@ fn test_get_all_goals_filters_by_owner() {
             );
         }
     }
+
+    #[test]
+    fn test_lock_goal_idempotent_already_locked() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "Idempotent Lock"), &1000, &2000000000);
+        assert!(client.get_goal(&id).unwrap().locked);
+        let result = client.lock_goal(&user, &id);
+        assert!(result);
+        assert!(client.get_goal(&id).unwrap().locked);
+    }
+
+    #[test]
+    fn test_lock_goal_idempotent_no_duplicate_event() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "No Dup Lock"), &1000, &2000000000);
+        client.unlock_goal(&user, &id);
+        client.lock_goal(&user, &id);
+        let events_after_first_lock = env.events().all().len();
+        client.lock_goal(&user, &id);
+        let events_after_second_lock = env.events().all().len();
+        assert_eq!(events_after_first_lock, events_after_second_lock);
+    }
+
+    #[test]
+    fn test_unlock_goal_idempotent_already_unlocked() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "Idempotent Unlock"), &1000, &2000000000);
+        client.unlock_goal(&user, &id);
+        assert!(!client.get_goal(&id).unwrap().locked);
+        let result = client.unlock_goal(&user, &id);
+        assert!(result);
+        assert!(!client.get_goal(&id).unwrap().locked);
+    }
+
+    #[test]
+    fn test_unlock_goal_idempotent_no_duplicate_event() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "No Dup Unlock"), &1000, &2000000000);
+        client.unlock_goal(&user, &id);
+        let events_after_first_unlock = env.events().all().len();
+        client.unlock_goal(&user, &id);
+        let events_after_second_unlock = env.events().all().len();
+        assert_eq!(events_after_first_unlock, events_after_second_unlock);
+    }
+
+    #[test]
+    fn test_lock_goal_many_repeated_calls_safe() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "Repeat Lock"), &1000, &2000000000);
+        for _ in 0..5 {
+            let result = client.lock_goal(&user, &id);
+            assert!(result);
+        }
+        assert!(client.get_goal(&id).unwrap().locked);
+    }
+
+    #[test]
+    fn test_unlock_goal_many_repeated_calls_safe() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let user = Address::generate(&env);
+        client.init();
+        env.mock_all_auths();
+        let id = client.create_goal(&user, &String::from_str(&env, "Repeat Unlock"), &1000, &2000000000);
+        client.unlock_goal(&user, &id);
+        for _ in 0..5 {
+            let result = client.unlock_goal(&user, &id);
+            assert!(result);
+        }
+        assert!(!client.get_goal(&id).unwrap().locked);
+    }
+
+    #[test]
+    fn test_idempotent_unlock_does_not_bypass_time_lock() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, SavingsGoalContract);
+        let client = SavingsGoalContractClient::new(&env, &contract_id);
+        let owner = Address::generate(&env);
+        env.mock_all_auths();
+        set_ledger_time(&env, 1, 1000);
+        let id = client.create_goal(&owner, &String::from_str(&env, "TimeLock"), &10000, &5000);
+        client.add_to_goal(&owner, &id, &5000);
+        client.unlock_goal(&owner, &id);
+        client.set_time_lock(&owner, &id, &10000);
+        client.unlock_goal(&owner, &id);
+        let result = client.try_withdraw_from_goal(&owner, &id, &1000);
+        assert!(result.is_err());
+    }
 }
