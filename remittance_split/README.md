@@ -175,7 +175,8 @@ Disables the global emergency stop. This is the only mutating entrypoint callabl
 
 #### `set_upgrade_admin(env, caller, new_admin) -> ()`
 
-Transfers upgrade authority to `new_admin`. Owner-only and blocked while paused.
+Assigns or transfers upgrade authority to `new_admin`. The owner sets the initial admin; after
+that, only the current upgrade admin may transfer the role. Blocked while paused.
 
 #### `set_version(env, caller, new_version) -> ()`
 
@@ -184,7 +185,7 @@ Persists a new version marker for migrations. Upgrade-admin-only and blocked whi
 #### `import_snapshot(env, caller, nonce, snapshot) -> bool`
 
 Imports a validated snapshot back into contract storage. Owner-only, nonce-protected, and blocked
-while paused.
+while paused. Snapshots must carry a supported `schema_version` and a valid checksum.
 
 #### `create_remittance_schedule(env, owner, amount, next_due, interval) -> u32`
 

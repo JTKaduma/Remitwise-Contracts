@@ -100,11 +100,14 @@ pub enum SplitEvent {
     DistributionCompleted,
 }
 
-/// Snapshot for data export/import (migration). Checksum is a simple numeric digest for on-chain verification.
+/// Snapshot for data export/import (migration).
+///
+/// `schema_version` carries the explicit snapshot format version so importers can
+/// reject unsupported formats while still allowing compatible migrations.
 #[contracttype]
 #[derive(Clone)]
 pub struct ExportSnapshot {
-    pub version: u32,
+    pub schema_version: u32,
     pub checksum: u64,
     pub config: SplitConfig,
 }
@@ -146,7 +149,10 @@ pub enum ScheduleEvent {
     Cancelled,
 }
 
-const SNAPSHOT_VERSION: u32 = 1;
+/// Current snapshot schema version. Bump when the export/import format changes.
+const SCHEMA_VERSION: u32 = 1;
+/// Oldest snapshot schema version accepted by this contract.
+const MIN_SUPPORTED_SCHEMA_VERSION: u32 = 1;
 const MAX_AUDIT_ENTRIES: u32 = 100;
 const CONTRACT_VERSION: u32 = 1;
 
@@ -271,15 +277,15 @@ impl RemittanceSplit {
         env.storage().instance().get(&symbol_short!("UPG_ADM"))
     }
 
-    /// Set the upgrade administrator allowed to change the contract version marker.
+    /// Set or transfer the upgrade administrator role.
     ///
     /// # Arguments
-    /// * `caller` - Split owner address (must authorize)
+    /// * `caller` - Owner for the initial assignment, or current upgrade admin for transfers
     /// * `new_admin` - Address that will gain upgrade authority
     ///
     /// # Errors
     /// - `NotInitialized` if the split has not been initialized yet
-    /// - `Unauthorized` if `caller` is not the owner or the contract is currently paused
+    /// - `Unauthorized` if `caller` is not allowed to perform the assignment or the contract is paused
     pub fn set_upgrade_admin(
         env: Env,
         caller: Address,
@@ -292,13 +298,33 @@ impl RemittanceSplit {
             .instance()
             .get(&symbol_short!("CONFIG"))
             .ok_or(RemittanceSplitError::NotInitialized)?;
-        if config.owner != caller {
-            return Err(RemittanceSplitError::Unauthorized);
+
+        let current_upgrade_admin = Self::get_upgrade_admin(&env);
+        match current_upgrade_admin.clone() {
+            None => {
+                if config.owner != caller {
+                    return Err(RemittanceSplitError::Unauthorized);
+                }
+            }
+            Some(current_admin) => {
+                if current_admin != caller {
+                    return Err(RemittanceSplitError::Unauthorized);
+                }
+            }
         }
         env.storage()
             .instance()
             .set(&symbol_short!("UPG_ADM"), &new_admin);
+        env.events().publish(
+            (symbol_short!("split"), symbol_short!("adm_xfr")),
+            (current_upgrade_admin, new_admin.clone()),
+        );
         Ok(())
+    }
+
+    /// Return the currently configured upgrade administrator, if one exists.
+    pub fn get_upgrade_admin_public(env: Env) -> Option<Address> {
+        Self::get_upgrade_admin(&env)
     }
 
     /// Update the contract version marker used for migrations and upgrade coordination.
@@ -707,9 +733,13 @@ impl RemittanceSplit {
         if config.owner != caller {
             return Err(RemittanceSplitError::Unauthorized);
         }
-        let checksum = Self::compute_checksum(SNAPSHOT_VERSION, &config);
+        let checksum = Self::compute_checksum(SCHEMA_VERSION, &config);
+        env.events().publish(
+            (symbol_short!("split"), symbol_short!("snap_exp")),
+            SCHEMA_VERSION,
+        );
         Ok(Some(ExportSnapshot {
-            version: SNAPSHOT_VERSION,
+            schema_version: SCHEMA_VERSION,
             checksum,
             config,
         }))
@@ -725,7 +755,7 @@ impl RemittanceSplit {
     /// # Errors
     /// - `Unauthorized` if `caller` is not the split owner or the contract is paused
     /// - `InvalidNonce` if the replay-protection nonce does not match
-    /// - `UnsupportedVersion` if the snapshot version is not supported
+    /// - `UnsupportedVersion` if the snapshot schema version is not supported
     /// - `ChecksumMismatch` if the snapshot checksum is invalid
     /// - `PercentagesDoNotSumTo100` if the imported configuration is malformed
     /// - `NotInitialized` if no existing configuration is present to authorize the caller
@@ -739,11 +769,13 @@ impl RemittanceSplit {
         Self::require_not_paused(&env)?;
         Self::require_nonce(&env, &caller, nonce)?;
 
-        if snapshot.version != SNAPSHOT_VERSION {
+        if snapshot.schema_version < MIN_SUPPORTED_SCHEMA_VERSION
+            || snapshot.schema_version > SCHEMA_VERSION
+        {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
             return Err(RemittanceSplitError::UnsupportedVersion);
         }
-        let expected = Self::compute_checksum(snapshot.version, &snapshot.config);
+        let expected = Self::compute_checksum(snapshot.schema_version, &snapshot.config);
         if snapshot.checksum != expected {
             Self::append_audit(&env, symbol_short!("import"), &caller, false);
             return Err(RemittanceSplitError::ChecksumMismatch);

@@ -945,7 +945,7 @@ fn test_upgrade_mutators_paused_rejected_and_unpause_restores_access() {
     assert_eq!(paused_upgrade, Err(Ok(RemittanceSplitError::Unauthorized)));
 
     client.unpause(&owner);
-    client.set_upgrade_admin(&owner, &next_upgrade_admin);
+    client.set_upgrade_admin(&upgrade_admin, &next_upgrade_admin);
     client.set_version(&next_upgrade_admin, &2);
 
     assert_eq!(client.get_version(), 2);
