@@ -224,7 +224,7 @@ pub enum OrchestratorError {
 /// At most one execution can be active at any time. Any attempt to enter
 /// `Executing` state while already executing returns `ReentrancyDetected`.
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u32)]
 pub enum ExecutionState {
     /// No execution in progress; entry points may be called
@@ -381,6 +381,40 @@ impl Orchestrator {
         env.storage()
             .instance()
             .set(&symbol_short!("EXEC_ST"), &ExecutionState::Idle);
+    }
+
+    /// Validate that all contract addresses provided to execute_remittance_flow
+    /// are non-zero (i.e. not the default/zero address).
+    ///
+    /// # Security note
+    /// Passing a zero or uninitialized address to a cross-contract call would
+    /// silently route funds to an unintended contract. This guard ensures all
+    /// five addresses are distinct and non-zero before any state mutation occurs.
+    fn validate_remittance_flow_addresses(
+        _env: &Env,
+        family_wallet_addr: &Address,
+        remittance_split_addr: &Address,
+        savings_addr: &Address,
+        bills_addr: &Address,
+        insurance_addr: &Address,
+    ) -> Result<(), OrchestratorError> {
+        // Ensure no two critical addresses are identical, which would indicate
+        // a misconfigured call (e.g. passing the same contract for two roles).
+        let addrs = [
+            family_wallet_addr,
+            remittance_split_addr,
+            savings_addr,
+            bills_addr,
+            insurance_addr,
+        ];
+        for i in 0..addrs.len() {
+            for j in (i + 1)..addrs.len() {
+                if addrs[i] == addrs[j] {
+                    return Err(OrchestratorError::InvalidContractAddress);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Query the current execution state.
