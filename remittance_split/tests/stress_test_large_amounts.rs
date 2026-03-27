@@ -216,3 +216,43 @@ fn test_insurance_remainder_calculation_with_large_values() {
     let total: i128 = amounts.iter().sum();
     assert_eq!(total, large_amount);
 }
+
+#[test]
+fn test_calculate_split_overflow_detection() {
+    // Amounts that require total_amount * percentage to overflow i128 must
+    // return Err(Overflow) — not silently produce a wrong result.
+    //
+    // With 50/30/15/5:
+    //   checked_mul(i128::MAX, 50) overflows because i128::MAX * 50 > i128::MAX.
+    // The contract must return RemittanceSplitError::Overflow for these inputs.
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = <Address as AddressTrait>::generate(&env);
+    env.mock_all_auths();
+
+    init(&client, &env, &owner, 50, 30, 15, 5);
+
+    // i128::MAX: 50 * i128::MAX overflows → must return Overflow
+    let result = client.try_calculate_split(&i128::MAX);
+    assert_eq!(
+        result,
+        Err(Ok(remittance_split::RemittanceSplitError::Overflow)),
+        "i128::MAX must produce Overflow, not a silent wrong result"
+    );
+
+    // i128::MAX / 40: 50 * (i128::MAX/40) still overflows
+    let result2 = client.try_calculate_split(&(i128::MAX / 40));
+    assert_eq!(
+        result2,
+        Err(Ok(remittance_split::RemittanceSplitError::Overflow)),
+        "i128::MAX/40 must produce Overflow"
+    );
+
+    // Safe boundary: i128::MAX / 200 succeeds (used in other stress tests)
+    let result3 = client.try_calculate_split(&(i128::MAX / 200));
+    assert!(result3.is_ok(), "i128::MAX/200 must succeed");
+    let amounts = result3.unwrap().unwrap();
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, i128::MAX / 200);
+}

@@ -1050,3 +1050,843 @@ fn test_import_snapshot_unauthorized_caller_rejected() {
         "non-owner must not import snapshot"
     );
 }
+
+// ============================================================================
+// Additional tests for issue #245 — strict percentage invariant enforcement
+// ============================================================================
+
+// ---------------------------------------------------------------------------
+// Helpers used by new tests
+// ---------------------------------------------------------------------------
+
+/// Shared ledger setup for schedule tests: timestamp=1000, sequence=100.
+fn set_ledger_time(env: &Env, timestamp: u64) {
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        protocol_version: 20,
+        sequence_number: 100,
+        timestamp,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 100_000,
+    });
+}
+
+/// One-liner setup: register contract, create client and owner, mock all auths.
+macro_rules! setup_test_env {
+    ($env:ident, $contract:ident, $client_type:ident, $client:ident, $owner:ident) => {
+        let $env = Env::default();
+        $env.mock_all_auths();
+        let contract_id = $env.register_contract(None, $contract);
+        let $client = $client_type::new(&$env, &contract_id);
+        let $owner = Address::generate(&$env);
+    };
+}
+
+// ---------------------------------------------------------------------------
+// initialize_split — additional invariant tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_initialize_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    let ok = client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    assert!(ok);
+}
+
+#[test]
+fn test_initialize_split_success() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &40, &30, &20, &10);
+    let cfg = client.get_config().unwrap();
+    assert_eq!(cfg.spending_percent, 40);
+    assert_eq!(cfg.savings_percent, 30);
+    assert_eq!(cfg.bills_percent, 20);
+    assert_eq!(cfg.insurance_percent, 10);
+}
+
+#[test]
+fn test_initialize_split_valid() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    // All-in-one-bucket is valid
+    let ok = client.initialize_split(&owner, &0, &token_id, &100, &0, &0, &0);
+    assert!(ok);
+}
+
+#[test]
+fn test_initialize_split_percentages_must_sum_to_100() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    // 50+50+10+0 = 110 ≠ 100
+    let result = client.try_initialize_split(&owner, &0, &token_id, &50, &50, &10, &0);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100)));
+}
+
+#[test]
+fn test_initialize_split_invalid_over_100() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    // Single bucket > 100 → PercentageOutOfRange
+    let result = client.try_initialize_split(&owner, &0, &token_id, &101, &0, &0, &0);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentageOutOfRange)));
+}
+
+#[test]
+fn test_initialize_split_with_zero_percentages() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    // All zeros sum to 0 ≠ 100
+    let result = client.try_initialize_split(&owner, &0, &token_id, &0, &0, &0, &0);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::PercentagesDoNotSumTo100)));
+}
+
+#[test]
+fn test_initialize_split_already_initialized_panics() {
+    // try_ variant returns the structured error (no panic expected here)
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let result = client.try_initialize_split(&owner, &1, &token_id, &50, &30, &15, &5);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::AlreadyInitialized)));
+}
+
+#[test]
+fn test_initialize_split_update_existing() {
+    // After init, calling initialize again returns AlreadyInitialized —
+    // the only way to change config is update_split.
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let result = client.try_initialize_split(&owner, &1, &token_id, &25, &25, &25, &25);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::AlreadyInitialized)));
+
+    // Original config must be unchanged
+    let cfg = client.get_config().unwrap();
+    assert_eq!(cfg.spending_percent, 50);
+}
+
+#[test]
+fn test_initialize_split_invalid_does_not_overwrite() {
+    // A failed init must leave the already-stored config intact.
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    // Attempt a bad second init — must fail
+    let _ = client.try_initialize_split(&owner, &1, &token_id, &60, &60, &0, &0);
+
+    let cfg = client.get_config().unwrap();
+    assert_eq!(cfg.spending_percent, 50);
+    assert_eq!(cfg.savings_percent, 30);
+}
+
+#[test]
+fn test_initialize_split_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    // At least the Initialized event must have been published
+    assert!(!env.events().all().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// update_split — additional invariant tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_update_split_owner_only() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let other = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let result = client.try_update_split(&other, &0, &25, &25, &25, &25);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::Unauthorized)));
+}
+
+#[test]
+fn test_update_split_boundary_percentages() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    // 100/0/0/0 is a valid boundary
+    let ok = client.update_split(&owner, &1, &100, &0, &0, &0);
+    assert!(ok);
+    let cfg = client.get_config().unwrap();
+    assert_eq!(cfg.spending_percent, 100);
+    assert_eq!(cfg.savings_percent, 0);
+    assert_eq!(cfg.bills_percent, 0);
+    assert_eq!(cfg.insurance_percent, 0);
+}
+
+#[test]
+fn test_update_split_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let caller = Address::generate(&env);
+
+    let result = client.try_update_split(&caller, &0, &25, &25, &25, &25);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::NotInitialized)));
+}
+
+#[test]
+fn test_instance_ttl_refreshed_on_update_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        protocol_version: 20,
+        sequence_number: 100,
+        timestamp: 1000,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 100,
+        min_persistent_entry_ttl: 100,
+        max_entry_ttl: 700_000,
+    });
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    client.update_split(&owner, &1, &25, &25, &25, &25);
+
+    let ttl = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+    assert!(ttl >= 518_400, "TTL must be bumped after update_split");
+}
+
+// ---------------------------------------------------------------------------
+// get_config / get_split — before and after init
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_config_returns_none_before_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    assert!(client.get_config().is_none());
+}
+
+#[test]
+fn test_get_config_returns_some_after_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    assert!(client.get_config().is_some());
+}
+
+#[test]
+fn test_get_split_default() {
+    // Before initialization get_split falls back to the hardcoded default (50/30/15/5)
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let split = client.get_split();
+    // Default from lib.rs: 50,30,15,5
+    assert_eq!(split.get(0).unwrap(), 50u32);
+    assert_eq!(split.get(1).unwrap(), 30u32);
+    assert_eq!(split.get(2).unwrap(), 15u32);
+    assert_eq!(split.get(3).unwrap(), 5u32);
+}
+
+#[test]
+fn test_get_split_returns_default_before_init() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let split = client.get_split();
+    let sum: u32 = (0..4).map(|i| split.get(i).unwrap()).sum();
+    assert_eq!(sum, 100, "default split must sum to 100");
+}
+
+#[test]
+fn test_get_split_configured_values() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &40, &30, &20, &10);
+    let split = client.get_split();
+    assert_eq!(split.get(0).unwrap(), 40u32);
+    assert_eq!(split.get(1).unwrap(), 30u32);
+    assert_eq!(split.get(2).unwrap(), 20u32);
+    assert_eq!(split.get(3).unwrap(), 10u32);
+}
+
+#[test]
+fn test_uninitialized_defaults() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    assert!(client.get_config().is_none());
+    // get_split still works (returns hardcoded default)
+    let split = client.get_split();
+    assert_eq!(split.len(), 4);
+}
+
+// ---------------------------------------------------------------------------
+// calculate_split — expanded coverage
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_calculate_split_basic() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let amounts = client.calculate_split(&200);
+    assert_eq!(amounts.get(0).unwrap(), 100);
+    assert_eq!(amounts.get(1).unwrap(), 60);
+    assert_eq!(amounts.get(2).unwrap(), 30);
+    assert_eq!(amounts.get(3).unwrap(), 10);
+}
+
+#[test]
+fn test_calculate_split_positive_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    // Smallest positive amount still works
+    let result = client.try_calculate_split(&1);
+    assert!(result.is_ok());
+}
+
+#[test]
+fn test_calculate_split_negative_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let result = client.try_calculate_split(&-1);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidAmount)));
+}
+
+#[test]
+fn test_calculate_split_zero_or_negative_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    assert_eq!(
+        client.try_calculate_split(&0),
+        Err(Ok(RemittanceSplitError::InvalidAmount))
+    );
+    assert_eq!(
+        client.try_calculate_split(&-100),
+        Err(Ok(RemittanceSplitError::InvalidAmount))
+    );
+}
+
+#[test]
+fn test_calculate_split_default_when_uninitialized() {
+    // Uninitialized → calculate_split uses the hardcoded default (50/30/15/5)
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+
+    let amounts = client.calculate_split(&1000);
+    assert_eq!(amounts.get(0).unwrap(), 500); // 50%
+    assert_eq!(amounts.get(1).unwrap(), 300); // 30%
+    assert_eq!(amounts.get(2).unwrap(), 150); // 15%
+    assert_eq!(amounts.get(3).unwrap(), 50);  //  5%
+}
+
+#[test]
+fn test_calculate_split_rounding_total_matches() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &33, &33, &33, &1);
+    let amounts = client.calculate_split(&100);
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, 100);
+}
+
+#[test]
+fn test_calculate_split_rounding_varied_percentages() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &17, &31, &29, &23);
+    let amounts = client.calculate_split(&999);
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, 999);
+}
+
+#[test]
+fn test_calculate_split_rounding_rigorous() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &33, &33, &33, &1);
+    for amount in [1i128, 7, 13, 99, 101, 997, 10_007] {
+        let amounts = client.calculate_split(&amount);
+        let total: i128 = amounts.iter().sum();
+        assert_eq!(total, amount, "sum mismatch for amount={}", amount);
+    }
+}
+
+#[test]
+fn test_calculate_split_small_amount_rounding() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    // amount=1: 50% → 0, 30% → 0, 15% → 0, insurance remainder → 1
+    let amounts = client.calculate_split(&1);
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, 1);
+}
+
+#[test]
+fn test_calculate_split_large_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let amount = 1_000_000_000_000i128;
+    let amounts = client.calculate_split(&amount);
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, amount);
+}
+
+#[test]
+fn test_calculate_split_large_non_divisible_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &33, &33, &33, &1);
+    let amount = 999_999_999_997i128;
+    let amounts = client.calculate_split(&amount);
+    let total: i128 = amounts.iter().sum();
+    assert_eq!(total, amount);
+}
+
+#[test]
+fn test_calculate_split_with_zero_categories() {
+    // Zero-percentage buckets produce zero allocation; remainder goes to insurance
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &0, &0, &0, &100);
+    let amounts = client.calculate_split(&500);
+    assert_eq!(amounts.get(0).unwrap(), 0);
+    assert_eq!(amounts.get(1).unwrap(), 0);
+    assert_eq!(amounts.get(2).unwrap(), 0);
+    assert_eq!(amounts.get(3).unwrap(), 500);
+}
+
+#[test]
+fn test_calculate_split_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let before = env.events().all().len();
+    client.calculate_split(&1000);
+    assert!(env.events().all().len() > before, "calculate_split must emit at least one event");
+}
+
+#[test]
+fn test_calculate_split_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    client.calculate_split(&1000);
+    let events = env.events().all();
+    // Verify SplitCalculated event topic is present
+    let has_calc = events.iter().any(|e| {
+        Symbol::try_from_val(&env, &e.1.get(0).unwrap())
+            .map(|t: Symbol| t == symbol_short!("calc"))
+            .unwrap_or(false)
+    });
+    assert!(has_calc, "expected a 'calc' topic event from calculate_split");
+}
+
+// ---------------------------------------------------------------------------
+// Boundary split configs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_split_boundary_0_100_0_0() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &0, &100, &0, &0);
+    let amounts = client.calculate_split(&1000);
+    assert_eq!(amounts.get(0).unwrap(), 0);
+    assert_eq!(amounts.get(1).unwrap(), 1000);
+    assert_eq!(amounts.get(2).unwrap(), 0);
+    assert_eq!(amounts.get(3).unwrap(), 0);
+}
+
+#[test]
+fn test_split_boundary_0_0_100_0() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &0, &0, &100, &0);
+    let amounts = client.calculate_split(&1000);
+    assert_eq!(amounts.get(0).unwrap(), 0);
+    assert_eq!(amounts.get(1).unwrap(), 0);
+    assert_eq!(amounts.get(2).unwrap(), 1000);
+    assert_eq!(amounts.get(3).unwrap(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Events — multi-operation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_event_emitted_on_initialize_and_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let after_init = env.events().all().len();
+    assert!(after_init > 0);
+
+    client.update_split(&owner, &1, &25, &25, &25, &25);
+    let after_update = env.events().all().len();
+    assert!(after_update > after_init, "update_split must emit additional events");
+}
+
+#[test]
+fn test_multiple_operations_emit_multiple_events() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    client.calculate_split(&1000);
+    client.calculate_split(&2000);
+    // init + 2× calc → at least 3 event groups
+    assert!(env.events().all().len() >= 3);
+}
+
+// ---------------------------------------------------------------------------
+// Data persistence
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_split_data_persists_across_ledger_advancements() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    client.initialize_split(&owner, &0, &token_id, &40, &30, &20, &10);
+
+    // Advance ledger sequence and timestamp
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        protocol_version: 20,
+        sequence_number: 999,
+        timestamp: 99_999,
+        network_id: [0; 32],
+        base_reserve: 10,
+        min_temp_entry_ttl: 1,
+        min_persistent_entry_ttl: 1,
+        max_entry_ttl: 1_000_000,
+    });
+
+    let cfg = client.get_config().unwrap();
+    assert_eq!(cfg.spending_percent, 40);
+    assert_eq!(cfg.savings_percent, 30);
+    assert_eq!(cfg.bills_percent, 20);
+    assert_eq!(cfg.insurance_percent, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Remittance schedules — additional tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_create_remittance_schedule() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    set_ledger_time(&env, 1000);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    let id = client.create_remittance_schedule(&owner, &5000, &2000, &86400);
+    assert_eq!(id, 1);
+    let sched = client.get_remittance_schedule(&id).unwrap();
+    assert_eq!(sched.amount, 5000);
+    assert_eq!(sched.next_due, 2000);
+    assert_eq!(sched.interval, 86400);
+    assert!(sched.active);
+    assert!(sched.recurring);
+}
+
+#[test]
+fn test_get_remittance_schedules() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    set_ledger_time(&env, 1000);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    client.create_remittance_schedule(&owner, &1000, &2000, &3600);
+    client.create_remittance_schedule(&owner, &2000, &3000, &7200);
+
+    let schedules = client.get_remittance_schedules(&owner);
+    assert_eq!(schedules.len(), 2);
+}
+
+#[test]
+fn test_modify_remittance_schedule() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    set_ledger_time(&env, 1000);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+    let id = client.create_remittance_schedule(&owner, &1000, &2000, &3600);
+
+    let ok = client.modify_remittance_schedule(&owner, &id, &9999, &5000, &7200);
+    assert!(ok);
+
+    let sched = client.get_remittance_schedule(&id).unwrap();
+    assert_eq!(sched.amount, 9999);
+    assert_eq!(sched.next_due, 5000);
+    assert_eq!(sched.interval, 7200);
+}
+
+#[test]
+fn test_remittance_schedule_validation() {
+    // next_due must be strictly greater than the current ledger timestamp
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    set_ledger_time(&env, 5000);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    // next_due == current timestamp (not strictly in the future)
+    let result = client.try_create_remittance_schedule(&owner, &1000, &5000, &3600);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidDueDate)));
+
+    // next_due in the past
+    let result2 = client.try_create_remittance_schedule(&owner, &1000, &4999, &3600);
+    assert_eq!(result2, Err(Ok(RemittanceSplitError::InvalidDueDate)));
+}
+
+#[test]
+fn test_remittance_schedule_zero_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RemittanceSplit);
+    let client = RemittanceSplitClient::new(&env, &contract_id);
+    let owner = Address::generate(&env);
+    let token_admin = Address::generate(&env);
+    let token_id = setup_token(&env, &token_admin, &owner, 0);
+
+    set_ledger_time(&env, 1000);
+    client.initialize_split(&owner, &0, &token_id, &50, &30, &15, &5);
+
+    let result = client.try_create_remittance_schedule(&owner, &0, &2000, &3600);
+    assert_eq!(result, Err(Ok(RemittanceSplitError::InvalidAmount)));
+}
